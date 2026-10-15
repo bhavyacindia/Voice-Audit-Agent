@@ -6,6 +6,7 @@ import * as deepgram from "@livekit/agents-plugin-deepgram";
 import * as silero from "@livekit/agents-plugin-silero";
 import { askCloudflare, type ChatMessage, type ToolName } from "./cloudflare.js";
 import { getContact, markResolved, recordIssue } from "./db.js";
+import { chooseReplyLanguage, type ReplyLanguage } from "./language.js";
 
 type Stage = "awaiting_resolution" | "awaiting_issue" | "finished";
 type ToolResult = { done: true } | { done: false; result: string; fallback: string };
@@ -39,7 +40,7 @@ const agent = defineAgent({
     context.addShutdownCallback(() => cartesiaTts.close());
 
     const session = new voice.AgentSession({
-      stt: new deepgram.STT({ model: "nova-3", language: "en" }),
+      stt: new deepgram.STT({ model: "nova-3", language: "multi" }),
       tts: cartesiaTts,
       vad: await silero.VAD.load({ forceCPU: true, minSilenceDuration: 350 }),
       turnHandling: {
@@ -48,13 +49,21 @@ const agent = defineAgent({
       },
     });
     let stage: Stage = "awaiting_resolution";
+    let replyLanguage: ReplyLanguage = "en";
     const history: ChatMessage[] = [];
     const instructions = `You are a helpful, concise voice assistant.
-Speak only in English. Keep replies to one or two short sentences.
+Keep replies to one or two short sentences. You understand English, Hindi, and Hinglish.
+For an English caller, reply in English. For a Hindi or Hinglish caller, reply naturally in Hindi/Hinglish written with English letters (Romanized Hindi), for example "Kya aapki query resolve ho gayi?" Never translate their Hindi into English just to answer.
+Do not use Devanagari in your replies. Keep names and issue details accurate.
 Your job is to find out if the caller's existing query is resolved. If not, ask what the issue was and save their description.
 You may answer a brief greeting, then return to the resolution question. For unrelated requests, politely say you can only help with query resolution.
 Call markResolved only when the caller clearly confirms resolution. Call askForIssue when they say it is not resolved.
 Call recordIssue only after they describe the issue. Never invent issue details or claim a database change before a tool succeeds. Don't mention tools to the caller.`;
+
+    function say(text: string, allowInterruptions: boolean) {
+      cartesiaTts.updateOptions({ language: replyLanguage });
+      return session.say(text, { allowInterruptions });
+    }
 
     async function useTool(name: string, transcript: string): Promise<ToolResult> {
       if (name === "markResolved" && stage !== "finished") {
@@ -67,14 +76,14 @@ Call recordIssue only after they describe the issue. Never invent issue details 
         return {
           done: false,
           result: "The caller said the query is not resolved. Ask them to describe the issue.",
-          fallback: "What was the issue? Please describe it.",
+          fallback: replyLanguage === "hi" ? "Kya samasya thi? Kripya batayein." : "What was the issue? Please describe it.",
         };
       }
       if (name === "recordIssue" && stage === "awaiting_issue") {
         if (transcript.length > 1000) return {
           done: false,
           result: "The description is too long. Ask for 1,000 characters or fewer.",
-          fallback: "Please shorten the issue description.",
+          fallback: replyLanguage === "hi" ? "Kripya samasya ko thoda chhota karke batayein." : "Please shorten the issue description.",
         };
         await recordIssue(selectedContactId, transcript);
         stage = "finished";
@@ -83,13 +92,13 @@ Call recordIssue only after they describe the issue. Never invent issue details 
       return {
         done: false,
         result: "That action is not allowed at this step. Continue the resolution conversation.",
-        fallback: "Could you clarify that for me?",
+        fallback: replyLanguage === "hi" ? "Kya aap ise dobara samjha sakte hain?" : "Could you clarify that for me?",
       };
     }
 
     function finishSession() {
       try {
-        const speech = session.say("Thank you for your response.", { allowInterruptions: false });
+        const speech = say(replyLanguage === "hi" ? "Aapke jawab ke liye shukriya." : "Thank you for your response.", false);
         void speech.waitForPlayout()
           .catch((error) => console.error("Final speech failed:", error))
           .finally(() => context.shutdown("voice audit status recorded"));
@@ -104,6 +113,7 @@ Call recordIssue only after they describe the issue. Never invent issue details 
       onUserTurnCompleted: async (_context, _chatContext, message) => {
         const transcript = message.rawTextContent?.trim();
         if (!transcript || stage === "finished") return;
+        replyLanguage = chooseReplyLanguage(transcript, replyLanguage);
 
         try {
           const userMessage: ChatMessage = { role: "user", content: transcript };
@@ -111,7 +121,7 @@ Call recordIssue only after they describe the issue. Never invent issue details 
             ? ["markResolved", "askForIssue"]
             : ["markResolved", "recordIssue"];
           const messages: ChatMessage[] = [
-            { role: "system", content: `${instructions}\nCurrent step: ${stage}.` },
+            { role: "system", content: `${instructions}\nCurrent step: ${stage}. Reply language for this turn: ${replyLanguage === "hi" ? "natural Romanized Hindi/Hinglish using English letters only" : "English"}.` },
             ...history,
             userMessage,
           ];
@@ -142,10 +152,10 @@ Call recordIssue only after they describe the issue. Never invent issue details 
 
           if (!reply) throw new Error("Cloudflare returned an empty reply.");
           history.push(userMessage, { role: "assistant", content: reply });
-          session.say(reply, { allowInterruptions: true });
+          say(reply, true);
         } catch (error) {
           console.error("Voice audit could not respond:", error);
-          session.say("Sorry, I had trouble responding. Could you please say that again?", { allowInterruptions: true });
+          say(replyLanguage === "hi" ? "Maaf kijiye, mujhe jawab dene mein dikkat hui. Kya aap dobara bol sakte hain?" : "Sorry, I had trouble responding. Could you please say that again?", true);
         }
       },
     });
@@ -154,7 +164,7 @@ Call recordIssue only after they describe the issue. Never invent issue details 
       agent: resolutionAgent,
       room: context.room,
     });
-    await session.say(`Hi ${contact.name}. Is your query resolved? Please say yes or no.`, { allowInterruptions: true }).waitForPlayout();
+    await say(`Hi ${contact.name}. Is your query resolved? Please say yes or no.`, true).waitForPlayout();
   },
 });
 

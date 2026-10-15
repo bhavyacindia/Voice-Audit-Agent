@@ -9,7 +9,7 @@ A small local dashboard and voice agent for checking whether a Contact's query w
 - LiveKit credentials for the Agents console runner and semantic turn detector
 - Deepgram, Cartesia, and Cloudflare Workers AI API credentials
 
-Copy the required values into `.env` from `.env.example`. Set `MONGODB_URI`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_API_TOKEN`. The default LLM is `@cf/zai-org/glm-4.7-flash`; data goes to `voice_audit_local` unless `VOICE_AUDIT_DB` is set. Speech recognition uses Deepgram Nova-3 English and speech output uses the private Cartesia voice directly through the Cartesia plugin. Optional `CARTESIA_SPEED` (0.6–1.5), `CARTESIA_EMOTION`, and `CARTESIA_VOLUME` (0.5–2) adjust delivery; defaults are neutral speed and volume with no forced emotion.
+Copy the required values into `.env` from `.env.example`. Set `MONGODB_URI`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_API_TOKEN`. The default LLM is `@cf/zai-org/glm-4.7-flash`; data goes to `voice_audit_local` unless `VOICE_AUDIT_DB` is set. Speech recognition uses Deepgram Nova-3 multilingual for English/Hindi code-switching. The agent answers in English or Romanized Hindi/Hinglish based on the caller's speech, and Cartesia receives the matching language for speech output. The private Cartesia voice is used directly through the Cartesia plugin. Optional `CARTESIA_SPEED` (0.6–1.5), `CARTESIA_EMOTION`, and `CARTESIA_VOLUME` (0.5–2) adjust delivery; defaults are neutral speed and volume with no forced emotion.
 
 ## Run locally
 
