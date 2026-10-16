@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
-import { completeAudit, listAudits } from "./api";
-import type { AuditList, AuditRow } from "./types";
+import {
+  completeAudit,
+  getCallQueue,
+  listAudits,
+  startCallQueue,
+} from "./api";
+import type { AuditList, AuditRow, CallQueue } from "./types";
 const blankList: AuditList = {
   tickets: [],
   metrics: {
@@ -46,6 +51,8 @@ export function App() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [cloudCallNotice, setCloudCallNotice] = useState(false);
+  const [callQueue, setCallQueue] = useState<CallQueue | null>(null);
+  const [startingCalls, setStartingCalls] = useState(false);
 
   async function refresh() {
     const audits = await listAudits(page, from, to);
@@ -93,6 +100,32 @@ export function App() {
     };
   }, [page, from, to]);
 
+  useEffect(() => {
+    if (!callQueue || callQueue.status !== "running") return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const response = await getCallQueue(callQueue.id);
+        if (!active) return;
+        setCallQueue(response.queue);
+        if (response.queue.status !== "running") await refresh();
+      } catch (cause) {
+        if (active)
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not read call status.",
+          );
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 2000);
+    void poll();
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [callQueue?.id, callQueue?.status]);
+
   function select(id: string) {
     setSelection((ids) =>
       ids.includes(id)
@@ -103,9 +136,21 @@ export function App() {
     );
   }
 
-  function startCloudCall() {
+  async function startCloudCall() {
     if (!selection.length) return;
+    setStartingCalls(true);
+    setError("");
     setCloudCallNotice(true);
+    try {
+      const response = await startCallQueue(selection);
+      setCallQueue(response.queue);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not start call queue.",
+      );
+    } finally {
+      setStartingCalls(false);
+    }
   }
 
   function openAudit(row: AuditRow) {
@@ -203,18 +248,26 @@ export function App() {
             <div>
               <h2>AI call queue</h2>
               <p>
-                Select up to 10 pending tickets in call order. Calls will use
-                LiveKit Cloud after outbound calling is configured.
+                Select up to 10 pending tickets in order. LiveKit Cloud calls
+                each linked customer one at a time.
               </p>
             </div>
             <div className="queue-actions">
               <span className="queue-badge">{selection.length} selected</span>
               <button
                 className="primary"
-                disabled={!selection.length}
+                disabled={
+                  !selection.length ||
+                  startingCalls ||
+                  callQueue?.status === "running"
+                }
                 onClick={startCloudCall}
               >
-                Start AI Call
+                {startingCalls
+                  ? "Starting…"
+                  : callQueue?.status === "running"
+                    ? "Calling…"
+                    : "Start AI Call"}
               </button>
             </div>
             {selection.length > 0 && (
@@ -226,6 +279,15 @@ export function App() {
                       `${position + 1}. ${data.tickets.find((row) => row.id === id)?.ticket_number ?? id}`,
                   )
                   .join(" → ")}
+              </div>
+            )}
+            {callQueue && (
+              <div className="queue-progress" role="status">
+                Queue {callQueue.status}. Completed{" "}
+                {callQueue.completedTicketIds.length} of {callQueue.ticketIds.length}.
+                {callQueue.currentTicketId && ` Calling ${callQueue.currentTicketId}.`}
+                {callQueue.failedTicketId && ` Stopped at ${callQueue.failedTicketId}.`}
+                {callQueue.error && ` ${callQueue.error}`}
               </div>
             )}
           </section>
@@ -370,15 +432,23 @@ export function App() {
             </button>
             <h2>LiveKit Cloud calls</h2>
             <p className="muted">
-              {selection.length} ticket{selection.length === 1 ? " is" : "s are"} queued
-              in order. Cloud call launch is not connected yet; it needs the
-              LiveKit Cloud worker and outbound provider configuration.
+              {startingCalls
+                ? "Starting the LiveKit call queue…"
+                : callQueue ? (
+                  <>
+                    Queue {callQueue.status}. Completed{" "}
+                    {callQueue.completedTicketIds.length} of {callQueue.ticketIds.length}.
+                    {callQueue.error && ` ${callQueue.error}`}
+                  </>
+                ) : (
+                  `${selection.length} ticket${selection.length === 1 ? " is" : "s are"} selected in call order.`
+                )}
             </p>
-            <ol className="queued-ticket-list">
-              {selection.map((id) => {
-                return <li key={id}>{id}</li>;
-              })}
-            </ol>
+            {callQueue ? (
+              <ol className="queued-ticket-list">
+                {callQueue.ticketIds.map((id) => <li key={id}>{id}</li>)}
+              </ol>
+            ) : null}
             <div className="modal-actions">
               <button onClick={() => setCloudCallNotice(false)}>Close</button>
             </div>

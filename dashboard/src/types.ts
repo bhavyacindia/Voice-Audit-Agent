@@ -26,3 +26,13 @@ export type AuditList = {
   limit: number;
   pages: number;
 };
+
+export type CallQueue = {
+  id: string;
+  status: "running" | "completed" | "failed";
+  ticketIds: string[];
+  currentTicketId: string | null;
+  completedTicketIds: string[];
+  failedTicketId: string | null;
+  error: string | null;
+};

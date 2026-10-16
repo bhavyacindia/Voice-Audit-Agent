@@ -1,4 +1,4 @@
-import type { AuditList } from "./types";
+import type { AuditList, CallQueue } from "./types";
 
 const baseUrl = import.meta.env.DEV
   ? ""
@@ -7,6 +7,7 @@ const baseUrl = import.meta.env.DEV
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
+    credentials: "include",
     headers: { Accept: "application/json", ...init?.headers },
   });
   if (!response.ok) {
@@ -30,4 +31,16 @@ export function completeAudit(id: string, verdict: boolean, payload: string) {
     headers: { "Content-Type": "application/json", "X-Voice-Audit-Local": "1" },
     body: JSON.stringify({ verdict, payload }),
   });
+}
+
+export function startCallQueue(ticketIds: string[]) {
+  return request<{ queue: CallQueue }>("/api/calls", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticketIds }),
+  });
+}
+
+export function getCallQueue(id: string) {
+  return request<{ queue: CallQueue }>(`/api/calls/${encodeURIComponent(id)}`);
 }

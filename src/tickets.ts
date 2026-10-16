@@ -20,6 +20,7 @@ export type AuditRow = {
 export type TicketContext = {
   id: string;
   customerName: string | null;
+  customerPhone: string | null;
   ticket: TicketRecord;
 };
 
@@ -178,7 +179,7 @@ export async function listAudits(
   };
 }
 
-// Reads the full selected Ticket and linked customer name for the local voice agent.
+// Reads a pending Ticket and its linked Customer details for the agent and call queue.
 export async function getTicketContext(id: string): Promise<TicketContext> {
   if (!validId(id)) throw new TicketError("Invalid ticket ID.", 400);
   await connectTicketDb();
@@ -187,13 +188,26 @@ export async function getTicketContext(id: string): Promise<TicketContext> {
   if (!eligible(ticket))
     throw new TicketError("Ticket is not pending audit.", 409);
   const customer = (await CustomerModel.findById(ticket.customer_id)
-    .select("name")
-    .lean()) as { name?: string } | null;
+    .select("name phone_number")
+    .lean()) as { name?: string; phone_number?: string } | null;
   return {
     id: ticket._id.toString(),
     customerName: customer?.name ?? null,
+    customerPhone: customer?.phone_number ?? null,
     ticket,
   };
+}
+
+// Checks whether a new completed audit was appended during an outbound call.
+export async function hasAuditAfter(id: string, previousCount: number) {
+  await connectTicketDb();
+  const ticket = await TicketModel.findById(id)
+    .select("internal_information.audit")
+    .lean();
+  const audits = ticket?.internal_information?.audit ?? [];
+  return (
+    audits.length > previousCount && audits.at(-1)?.status === true
+  );
 }
 
 // Atomically appends one audit; a failed audit reopens the ticket but keeps its assignee.

@@ -1,60 +1,100 @@
-# Voice Audit — Phase 1 as-built handoff
+# Voice Audit — outbound calling as-built handoff
 
-The original Contact/Issue prototype has been replaced by a Ticket-based local audit. The dashboard prepares a command; it does not start an agent or place phone calls. Product Phase 2 outbound calling is not implemented.
+## Current scope
 
-## Architecture
+The app reads Circuit's existing Tickets and linked Customers. From the Call Audits dashboard an operator selects up to ten pending tickets in a specific order and starts a LiveKit Cloud outbound queue. The server dials the linked Customer's ten-digit Indian number as `+91##########`, runs the existing voice agent, and advances only after the existing Ticket audit has been saved and the agent call has ended.
+
+The calling code and dashboard integration are implemented locally. A local production worker received an outbound call, and Deepgram transcribed the caller's "Hello," but the LLM request timed out before an audit was saved. A complete audit call remains unverified. Hosted deployment requires the configuration below and a human smoke call. No direct call happens from the browser or local `pnpm voice` console.
+
+## Architecture and data flow
 
 ```mermaid
 flowchart LR
-  Operator[Operator] --> Dashboard[React dashboard]
-  Dashboard --> API[Loopback API]
-  API --> DB[(Circuit MongoDB)]
-  Dashboard --> Command[Copy PowerShell command]
-  Command --> Terminal[Interactive local terminal]
-  Terminal --> Agent[LiveKit Node agent]
-  Agent --> STT[Deepgram Nova-3 STT]
-  Agent --> LLM[Cloudflare GLM-4.7-Flash]
-  Agent --> TTS[Cartesia Sonic 3 TTS]
-  Agent --> DB
+  Operator --> Dashboard[Dashboard: ordered selection]
+  Dashboard -->|POST /api/calls| Access[Cloudflare Access JWT check]
+  Access --> API[Persistent Node API: in-memory queue]
+  API --> Ticket[Existing TicketModel]
+  Ticket -->|customer_id| Customer[Existing CustomerModel]
+  Customer -->|name and 10-digit phone_number| API
+  API -->|dispatch metadata: ticketId| Agent[LiveKit Cloud agent]
+  API -->|SIP participant +91 number| LK[LiveKit outbound trunk]
+  LK --> Agent
+  Agent -->|existing conversation + guarded audit| Ticket
+  API -->|audit verified and call ended| API
+  API -->|next ticket in order| Ticket
 ```
-
-The API lists Tickets joined to Customers and handles manual audit submissions. The dashboard stores the selected Ticket IDs in browser memory, in selection order. **Start AI Call** displays two PowerShell lines: a JSON array assigned to `VOICE_AUDIT_TICKET_IDS`, then `pnpm voice`. Copy and paste them into an interactive terminal in this repository. The terminal uses its microphone and speakers. One console session processes the selected tickets sequentially; the listed phone numbers are never dialed.
 
 ```mermaid
 sequenceDiagram
   participant O as Operator
-  participant U as Dashboard
-  participant A as Local LiveKit agent
-  participant D as Circuit DB
-  O->>U: Select 1–10 pending tickets in order
-  U->>O: Show copyable PowerShell command
-  O->>A: Paste command in local terminal
-  loop Each selected ticket
-    A->>D: Read Ticket + linked Customer name
-    O->>A: Greet or ask who is speaking
-    A->>O: LLM introduces Bhavya and asks about resolution
-    O->>A: Ask ticket questions or answer yes/no
-    A->>D: Complete guarded audit
-    A->>O: Thank customer; proceed to next ticket
-  end
+  participant D as Dashboard
+  participant A as Cloudflare Access
+  participant API as Node API
+  participant DB as Circuit MongoDB
+  participant LK as LiveKit Cloud
+  participant Agent as Existing voice agent
+  O->>D: Select up to 10 pending tickets in order
+  D->>A: POST /api/calls with ticket IDs
+  A->>API: Forward authenticated request
+  API->>DB: Validate pending Ticket; read linked Customer
+  API->>LK: Create room and dispatch one-ticket agent
+  LK->>Agent: Job metadata with Ticket ID
+  API->>LK: Dial Customer using trunk (+91 + 10 digits)
+  Agent->>DB: Existing guarded audit write after clear answer
+  API->>DB: Verify audit appended
+  API->>LK: Wait for agent to leave; clean up room
+  API->>LK: Start next selected ticket only after success
 ```
 
-The agent uses Deepgram Nova-3 with `language: "multi"`, Silero VAD, and LiveKit semantic turn detection. It waits for the caller to speak first. Cloudflare receives the full selected Ticket document and the linked customer's name on each turn. Remote-session access URLs, session IDs, and file-storage keys are redacted. The record includes `timestamps.created_at` and `timestamps.closed_at`, so the model can distinguish creation from closure. The record is untrusted data, not instructions; prompt guardrails tell the model not to read internal comments or staff IDs aloud. Its first reply introduces Bhavya from NComputing India, explains the known ticket context, and asks if the issue is resolved. It may answer questions about that ticket from those facts; unrelated questions are redirected to the audit. The first reply has no audit tools available, so a greeting or early yes/no cannot save an audit before the question. Later turns can invoke one of two guarded audit tools for a clear answer. Cloudflare's hidden reasoning is disabled to avoid the observed empty-response token exhaustion; it still generates the conversation and chooses tools. Application code fixes the saved comments: solved is `The query is resolved.`; unsolved is `The issue is not solved`. An unresolved audit reopens the Ticket, clears its former solution and closed workflow timestamps, and leaves `assigned_to` unchanged. It does not ask for another issue description. The linked Customer supplies the name; the agent does not receive the phone number. English and Hindi/Hinglish response handling exist, but other-language spoken output is not guaranteed in this phase.
+## Models and business logic
 
-## Components and configuration
+`TicketModel` and `CustomerModel` are imported from the existing `@circuit/models` package; neither schema is changed. `Ticket.customer_id` links to `Customer._id`. The API reads Customer `name` and `phone_number`, while the agent receives the selected Ticket's existing context. Only the current Ticket's existing guarded audit service writes data. There is no call model, queue collection, migration, or new database write path.
+
+Dispatch metadata selects one Ticket for a cloud job; the legacy local terminal path still uses its environment selection. For SIP calls, LiveKit's telephony background voice cancellation cleans audio before Deepgram and Silero VAD. Silero requires at least 150 ms of speech, uses a 0.6 activation threshold, and waits 500 ms of silence. After the caller joins, the agent speaks a ticket-specific opening after three seconds of no completed speech; an earlier caller utterance triggers the same opening immediately. This opening uses ticket data directly so it does not wait for Cloudflare. Cloudflare still handles later ticket questions and resolved/unresolved decisions. A Cloudflare timeout asks the caller to repeat instead of silently ending the agent. Solved and unsolved audit comments and Ticket status behavior are unchanged.
+
+## API and queue behavior
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/audits` | List eligible closed tickets, customer info, metrics, and pages |
+| `PATCH /api/tickets/:id/audit` | Existing guarded audit action |
+| `POST /api/calls` | Validate and start one ordered queue of 1–10 unique pending Ticket IDs; returns `202` with queue ID |
+| `GET /api/calls/:id` | Return queue state and progress for dashboard polling |
+
+Hosted requests require Cloudflare Access JWT signature, issuer, audience, and expiry validation. Browser calls use credentials; the API accepts only the configured dashboard origin for cross-origin access. The API uses LiveKit server credentials, creates a unique room per Ticket, explicitly dispatches `voice-audit-agent` with `{ ticketId }` metadata, waits for the agent, then creates a SIP participant with `waitUntilAnswered`, a 30-second ringing timeout, and a 5-minute maximum call duration.
+
+Exactly ten ASCII digits are accepted for Customer `phone_number`; `+91` is added at dial time. Missing or malformed numbers are not dialed. A no-answer/provider/agent error, call ending before an audit is saved, or timeout stops the queue without writing an audit for that call, retrying, or proceeding to later tickets. Prior successful audits remain saved. Queue progress is in process memory, so the API must be one persistent replica; a restart loses progress and requires operator review before resuming.
+
+## Configuration
+
+Set secrets only in the relevant server/agent deployment secret stores, not in browser variables:
+
+- API and agent: `CIRCUIT_DB_URL`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_OUTBOUND_TRUNK_ID`.
+- Existing agent providers: `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_AI_MODEL`.
+- Hosted API Access: `CLOUDFLARE_ACCESS_TEAM_DOMAIN` and `CLOUDFLARE_ACCESS_AUD`.
+- Cross-origin hosting only: `VOICE_AUDIT_DASHBOARD_ORIGIN` on the API and `VITE_API_URL` at dashboard build time. Same-origin hosting can proxy `/api` and leave both unset.
+
+The cloud build needs to resolve sibling `../circuit/packages/models` and `../circuit/packages/utils`; include the Circuit workspace packages in the build context and build their `dist` outputs. No deployment configuration has been applied from this implementation session.
+
+## Changed code ownership
 
 | File | Responsibility |
 | --- | --- |
-| `src/tickets.ts` | Connect to Circuit models, list audits, join Customer, check eligibility, save audit |
-| `src/server.ts` | Loopback `GET /api/audits` and `PATCH /api/tickets/:id/audit` |
-| `src/agent.ts` | Interactive audio and sequential per-ticket conversation |
-| `src/cloudflare.ts` | Cloudflare LLM request and audit tool descriptions |
-| `dashboard/src/` | Audit table, selection, copyable command, manual audit dialog |
+| `src/access.ts` | Verify Cloudflare Access identity for hosted API calls |
+| `src/calls.ts` | Validate phone/queue, dispatch agent, dial via trunk, verify audit, stop on failure |
+| `src/tickets.ts` | Existing Ticket read/audit operations plus linked Customer phone lookup and audit verification |
+| `src/server.ts` | Access/CORS handling and audit/call API endpoints |
+| `src/agent.ts` | Use one Ticket ID from LiveKit dispatch metadata, speak the opening promptly, filter telephony noise, and handle later LLM replies/audits |
+| `dashboard/src/api.ts` | Call start/status requests and credentialed API access |
+| `dashboard/src/App.tsx` | Start queue, show progress/failure and refresh audit data |
+| `dashboard/src/types.ts` | Queue API shape |
 
-Required `.env` values: `CIRCUIT_DB_URL` (same private URI as Circuit's `DB_URL`), `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_API_TOKEN`. `CLOUDFLARE_AI_MODEL` defaults to `@cf/zai-org/glm-4.7-flash`. Optional voice settings are `CARTESIA_SPEED`, `CARTESIA_VOLUME`, and `CARTESIA_EMOTION`. Old Contact/Issue collections and Contact ID commands are unused.
+## Deployment and human verification still required
 
-The API binds only to `127.0.0.1`. Its mutation header `X-Voice-Audit-Local: 1` is not authentication; do not expose the API publicly. There is no queue server or background voice worker. Saved audits persist in Circuit MongoDB. The guarded local writer prevents duplicate local writes, but Circuit's separate manual audit route does not share that atomic guard, so simultaneous writes across the two apps remain a race.
+1. Configure Cloudflare Access application/policy and its audience.
+2. Configure the existing LiveKit outbound trunk and agent deployment/secrets; set the corresponding API/agent variables above.
+3. Deploy the Node API as one persistent instance, building with the sibling Circuit packages available.
+4. Build/deploy the dashboard with same-origin API routing or `VITE_API_URL` and matching `VOICE_AUDIT_DASHBOARD_ORIGIN`.
+5. Sign in through Access and use a permitted, consenting test number. Verify one call, saved audit, queue completion, and then a two-ticket queue. Separately verify no-answer and invalid-phone paths stop without mutating the affected Ticket.
 
-## Run and verify
-
-Run `pnpm api` and `pnpm dev:dashboard` in separate terminals. Select pending tickets in the browser, click **Start AI Call**, copy the shown command, and paste it into a third PowerShell terminal in this repository. The `lk` CLI must be on that terminal's `PATH`. Greet the agent as each selected customer; check that it introduces itself, answers a ticket question from the supplied facts, redirects an unrelated question, and saves an audit only after a clear resolution answer. Verify the dashboard updates. Press Ctrl+C to stop early; generate a fresh command containing only still-pending tickets to resume. Human microphone and provider checks are required before relying on this flow.
+Do not use real customer numbers until the provider's consent and calling requirements are satisfied. The implementation does not make phone calls during build/typecheck verification.
