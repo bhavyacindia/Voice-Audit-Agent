@@ -1,40 +1,46 @@
-# Local Voice Audit Prototype
+# Local AI Call Audits — Phase 1
 
-A small local dashboard and voice agent for checking whether a Contact's query was resolved. A clear confirmation marks it resolved; otherwise the agent asks for an issue description and saves it for manual escalation. The agent currently speaks English only.
+This app reads Circuit's existing Tickets and linked Customers and displays a Circuit-style Call Audits dashboard. Select up to ten pending tickets in call order. The dashboard's **Start AI Call** button currently shows the queued tickets and the cloud setup status; it does not start a call yet. LiveKit Cloud worker and outbound provider integration are still required before the app can place real calls. The Phase 1 local voice agent remains in the repository as a legacy prototype; it is not launched by the dashboard.
 
-## Requirements
+See [the approved plan](plans/ticket-based-local-ai-audits.md) and [the as-built handoff](docs/phase-3-post-implementation.md) for the full data flow and limitations. The older [prototype plan](plans/local-voice-audit.md) is historical.
 
-- Node.js 22 or newer, pnpm, and the [LiveKit CLI](https://docs.livekit.io/reference/developer-tools/livekit-cli/)
-- MongoDB running locally or a MongoDB deployment that supports transactions
-- LiveKit credentials for the Agents console runner and semantic turn detector
-- Deepgram, Cartesia, and Cloudflare Workers AI API credentials
+## Setup
 
-Copy the required values into `.env` from `.env.example`. Set `MONGODB_URI`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_API_TOKEN`. The default LLM is `@cf/zai-org/glm-4.7-flash`; data goes to `voice_audit_local` unless `VOICE_AUDIT_DB` is set. Speech recognition uses Deepgram Nova-3 multilingual for English/Hindi code-switching. The agent answers in English or Romanized Hindi/Hinglish based on the caller's speech, and Cartesia receives the matching language for speech output. The private Cartesia voice is used directly through the Cartesia plugin. Optional `CARTESIA_SPEED` (0.6–1.5), `CARTESIA_EMOTION`, and `CARTESIA_VOLUME` (0.5–2) adjust delivery; defaults are neutral speed and volume with no forced emotion.
+Install Node.js 22+, pnpm, and the [LiveKit CLI](https://docs.livekit.io/reference/developer-tools/livekit-cli/). Run `pnpm install` from this folder. The app links `@circuit/models` from `../circuit/packages/models`; build that package if its `dist` files are missing.
 
-## Run locally
+In this app's `.env`, set `CIRCUIT_DB_URL` to the same private value as `DB_URL` in Circuit's `.env`. Keep the existing LiveKit, Deepgram, Cartesia, and Cloudflare credentials. The local API does **not** use the old `MONGODB_URI` or `VOICE_AUDIT_DB`. Never commit either `.env`. Required keys are listed in [.env.example](.env.example). Optional `CARTESIA_SPEED`, `CARTESIA_EMOTION`, and `CARTESIA_VOLUME` adjust the voice.
 
-In separate terminals, start the API and dashboard:
+In one PowerShell terminal inside this folder, run:
 
-```sh
-pnpm install
+```powershell
 pnpm api
+```
+
+Keep the API terminal open. In a second terminal, run:
+
+```powershell
 pnpm dev:dashboard
 ```
 
-Open the dashboard at the local Vite URL and create a Contact. Select it to see two copy-paste PowerShell options. Run either command from this project folder.
+Open the Vite URL printed by pnpm to use the dashboard. The **Start AI Call** button shows the selected queue and clearly reports that cloud calling is not connected yet. The audit list and manual audit action continue to use the local API.
 
-For microphone and speakers in your terminal only:
+The legacy Phase 1 voice agent can still be run manually from another PowerShell terminal, but the dashboard no longer generates its command. Set the selected ticket IDs yourself if you need to exercise that prototype:
 
 ```powershell
-$env:VOICE_AUDIT_CONTACT_ID = "replace-with-contact-id"
+$env:VOICE_AUDIT_TICKET_IDS = '["ticket-id-1","ticket-id-2"]'
 pnpm voice
 ```
 
-For browser audio and LiveKit Cloud session monitoring while the agent still runs on your computer:
+The single console session processes the selected tickets in order. Say "Hello, who is this?" to start each ticket's conversation, then answer as that customer. `lk` must be available in this terminal's `PATH`, and it needs access to your microphone and speakers. Press Ctrl+C to stop. This manual path is retained only for the Phase 1 prototype; the Phase 2 target is cloud-based calling.
 
-```powershell
-$env:VOICE_AUDIT_CONTACT_ID = "replace-with-contact-id"
-node scripts/voice-monitor.mjs
-```
+If the dashboard has no eligible tickets, preview six synthetic, closed demo Tickets and linked Customers with `pnpm seed:demo`. The preview prints the database name. To insert them, run `pnpm seed:demo --write <printed-database-name>` (for example, `pnpm seed:demo --write test`). These use clearly fake `000000000x` phone numbers, are never dialed, and rerunning the command leaves existing demo records—including completed audits—unchanged. Refresh the dashboard after seeding.
 
-The monitor command loads LiveKit credentials from `.env` for the CLI. Keep PowerShell open, click the **Agent console** URL it prints, then start a browser session. This connected mode creates a LiveKit room and makes session metrics visible; the terminal-only mode does not. Once a resolution or issue is saved, the agent thanks the caller and closes the voice session. The local API binds to `127.0.0.1`; the dashboard refreshes Contact statuses and Issues every few seconds. There are no phone calls, trunks, or external escalation actions.
+You can set `VOICE_AUDIT_TICKET_IDS` yourself to a JSON array of pending Ticket IDs and run `pnpm voice` to use the legacy prototype.
+
+## Audit behavior
+
+- Solved: append a completed audit with comment `The query is resolved.`; keep the ticket closed.
+- Unsolved: append a completed audit with comment `The issue is not solved`; reopen the ticket and clear its old solution/close timestamps. Keep `assigned_to` unchanged. The agent apologizes and says the query is marked unresolved for the technical team; it does not claim a technician was newly assigned.
+- The manual **Complete audit** dialog calls the same guarded local write service as the agent.
+
+The API binds to `127.0.0.1` with no account middleware. Its mutation header is not authentication; do not expose this local service publicly. The microphone flow must be tested by a human before relying on it. Outbound SIP/Vobiz calling and browser microphone sessions are later-phase work.

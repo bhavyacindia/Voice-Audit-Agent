@@ -7,18 +7,18 @@
     "api": "tsx src/server.ts",
     "dev:api": "tsx watch src/server.ts",
     "voice": "lk agent console src/agent.ts -- --import tsx",
+    "seed:demo": "tsx src/seed-demo.ts",
     "dev:dashboard": "pnpm --dir dashboard dev",
     "build:dashboard": "pnpm --dir dashboard build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@circuit/models": "file:../circuit/packages/models",
     "@livekit/agents": "^1.9.1",
     "@livekit/agents-plugin-cartesia": "1.9.2",
     "@livekit/agents-plugin-deepgram": "^1.9.1",
     "@livekit/agents-plugin-silero": "^1.9.1",
-    "dotenv": "^17.2.3",
-    "livekit-server-sdk": "^2.19.1",
-    "mongodb": "^7.1.0"
+    "dotenv": "^17.2.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

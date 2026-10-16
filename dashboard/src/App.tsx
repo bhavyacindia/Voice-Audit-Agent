@@ -1,136 +1,541 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { createContact, listContacts, listIssues } from "./api";
-import type { Contact, Issue } from "./types";
+import { useEffect, useState } from "react";
+import { completeAudit, listAudits } from "./api";
+import type { AuditList, AuditRow } from "./types";
+const blankList: AuditList = {
+  tickets: [],
+  metrics: {
+    pending_audits: 0,
+    completed_audits: 0,
+    problem_solved: 0,
+    problem_unsolved: 0,
+  },
+  total: 0,
+  page: 1,
+  limit: 10,
+  pages: 0,
+};
 
-type Page = "contacts" | "issues";
-const currentPage = (): Page => window.location.hash === "#/issues" ? "issues" : "contacts";
-
-function statusLabel(status: Contact["resolutionStatus"]) {
-  if (status === "needs_escalation") return "Needs escalation";
-  return status === "resolved" ? "Resolved" : "Pending";
+function dateText(value: string | null) {
+  return value
+    ? new Intl.DateTimeFormat("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(value))
+    : "—";
 }
 
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+function status(row: AuditRow) {
+  if (!row.audit.status) return "Pending";
+  return row.audit.verdict.status ? "Solved" : "Unsolved";
 }
 
 export function App() {
-  const [page, setPage] = useState<Page>(currentPage);
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [issues, setIssues] = useState<Issue[]>([]);
-  const [selectedId, setSelectedId] = useState("");
-  const [name, setName] = useState("");
+  const [data, setData] = useState<AuditList>(blankList);
+  const [page, setPage] = useState(1);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [selection, setSelection] = useState<string[]>([]);
+  const [detail, setDetail] = useState<AuditRow | null>(null);
+  const [auditTarget, setAuditTarget] = useState<AuditRow | null>(null);
+  const [verdict, setVerdict] = useState(false);
+  const [comment, setComment] = useState("");
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState<"terminal" | "monitor" | "">("");
+  const [cloudCallNotice, setCloudCallNotice] = useState(false);
 
-  useEffect(() => {
-    const onHashChange = () => setPage(currentPage());
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
+  async function refresh() {
+    const audits = await listAudits(page, from, to);
+    setData(audits);
+    setSelection((ids) =>
+      ids.filter(
+        (id) =>
+          !audits.tickets.some(
+            (ticket) => ticket.id === id && ticket.audit.status,
+          ),
+      ),
+    );
+  }
 
   useEffect(() => {
     let active = true;
-    const refresh = async (initial: boolean) => {
-      if (initial) setLoading(true);
-      else setRefreshing(true);
+    const load = async () => {
       try {
-        const [contactResult, issueResult] = await Promise.all([listContacts(), listIssues()]);
+        const audits = await listAudits(page, from, to);
         if (!active) return;
-        setContacts(contactResult.contacts);
-        setIssues(issueResult.issues);
+        setData(audits);
+        setSelection((ids) =>
+          ids.filter(
+            (id) =>
+              !audits.tickets.some(
+                (ticket) => ticket.id === id && ticket.audit.status,
+              ),
+          ),
+        );
         setError("");
-      } catch (requestError) {
-        if (active) setError(requestError instanceof Error ? requestError.message : "Unable to load the dashboard.");
+      } catch (cause) {
+        if (active)
+          setError(
+            cause instanceof Error ? cause.message : "Could not load audits.",
+          );
       } finally {
-        if (active) { setLoading(false); setRefreshing(false); }
+        if (active) setLoading(false);
       }
     };
-    void refresh(true);
-    const timer = window.setInterval(() => void refresh(false), 5000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, []);
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [page, from, to]);
 
-  const selectedContact = contacts.find((contact) => contact.id === selectedId) ?? null;
-  const contactNames = useMemo(() => new Map(contacts.map((contact) => [contact.id, contact.name])), [contacts]);
-  const resolvedCount = contacts.filter((contact) => contact.resolutionStatus === "resolved").length;
-  const escalationCount = contacts.filter((contact) => contact.resolutionStatus === "needs_escalation").length;
-  const terminalCommand = selectedContact ? `$env:VOICE_AUDIT_CONTACT_ID = "${selectedContact.id}"\npnpm voice` : "";
-  const monitorCommand = selectedContact ? `$env:VOICE_AUDIT_CONTACT_ID = "${selectedContact.id}"\nnode scripts/voice-monitor.mjs` : "";
+  function select(id: string) {
+    setSelection((ids) =>
+      ids.includes(id)
+        ? ids.filter((item) => item !== id)
+        : ids.length < 10
+          ? [...ids, id]
+          : ids,
+    );
+  }
 
-  async function handleCreateContact(event: FormEvent<HTMLFormElement>) {
+  function startCloudCall() {
+    if (!selection.length) return;
+    setCloudCallNotice(true);
+  }
+
+  function openAudit(row: AuditRow) {
+    setAuditTarget(row);
+    setVerdict(false);
+    setComment("The issue is not solved");
+  }
+
+  async function submitAudit(event: React.FormEvent) {
     event.preventDefault();
-    setSaving(true);
+    if (!auditTarget) return;
+    setWorking(true);
     setError("");
     try {
-      const result = await createContact(name.trim());
-      setContacts((current) => [result.contact, ...current]);
-      setSelectedId(result.contact.id);
-      setName("");
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to create contact.");
-    } finally { setSaving(false); }
+      await completeAudit(auditTarget.id, verdict, comment);
+      setAuditTarget(null);
+      await refresh();
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not complete audit.",
+      );
+    } finally {
+      setWorking(false);
+    }
   }
 
-  async function handleCopyCommand(command: string, option: "terminal" | "monitor") {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied(option);
-      window.setTimeout(() => setCopied(""), 1800);
-    } catch { setError("Clipboard access is unavailable. Copy the command manually."); }
-  }
-
-  return <div className="workspace">
-    <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">VA</span><span><strong>Voice Audit</strong><small>Local workspace</small></span></div>
-      <div className="nav-label">WORKSPACE</div>
-      <nav className="navigation" aria-label="Main navigation">
-        <a href="#/contacts" className={page === "contacts" ? "nav-link active" : "nav-link"} aria-current={page === "contacts" ? "page" : undefined}><span>Contacts</span><span className="nav-count">{contacts.length}</span></a>
-        <a href="#/issues" className={page === "issues" ? "nav-link active" : "nav-link"} aria-current={page === "issues" ? "page" : undefined}><span>Issues</span><span className="nav-count">{issues.length}</span></a>
-      </nav>
-      <div className="sidebar-foot"><span className="live-dot" /> Local prototype <small>Auto-refresh every 5 seconds</small></div>
-    </aside>
-
-    <main className="main-panel">
-      <header className="page-header">
-        <div><div className="breadcrumb">WORKSPACE <span>/</span> {page.toUpperCase()}</div><h1>{page === "contacts" ? "Contacts" : "Issues"}</h1><p>{page === "contacts" ? "Create a contact and start a voice audit session." : "Review the issues captured from unresolved conversations."}</p></div>
-        <div className="header-actions"><span className="sync-state"><span className="live-dot" /> {refreshing ? "Syncing" : "Live data"}</span><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>Refresh</button></div>
-      </header>
-
-      <div className="page-content">
-        {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")}>Dismiss</button></div>}
-        {page === "contacts" ? <>
-          <section className="stats-grid" aria-label="Contact summary">
-            <div className="stat-card"><span>Total contacts</span><strong>{contacts.length}</strong><small>All records</small></div>
-            <div className="stat-card"><span>Resolved</span><strong>{resolvedCount}</strong><small>Query completed</small></div>
-            <div className="stat-card"><span>Needs escalation</span><strong>{escalationCount}</strong><small>Issue recorded</small></div>
-          </section>
-          <div className="contacts-layout">
-            <section className="surface" aria-labelledby="contact-list-title">
-              <div className="surface-heading"><div><h2 id="contact-list-title">Contact directory</h2><p>Select a contact to prepare their voice session.</p></div><span className="count-tag">{contacts.length} CONTACTS</span></div>
-              <form className="create-form" onSubmit={handleCreateContact}><label htmlFor="contact-name">NEW CONTACT</label><div className="form-line"><input id="contact-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={80} required placeholder="Enter contact name" disabled={saving} /><button className="button button-primary" type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "+ Add contact"}</button></div></form>
-              <div className="list-header"><span>CONTACT</span><span>STATUS</span></div>
-              {loading ? <div className="empty-state" role="status">Loading contacts…</div> : contacts.length === 0 ? <div className="empty-state"><strong>No contacts yet</strong><span>Add a contact above to get started.</span></div> : <div className="contact-list">{contacts.map((contact) => <button type="button" className={`contact-row${selectedId === contact.id ? " selected" : ""}`} key={contact.id} onClick={() => { setSelectedId(contact.id); setCopied(""); }} aria-pressed={selectedId === contact.id}><span className="contact-identity"><span className="avatar">{contact.name.slice(0, 1).toUpperCase()}</span><span><strong>{contact.name}</strong><small>Updated {formatDate(contact.updatedAt)}</small></span></span><span className={`status status--${contact.resolutionStatus}`}>{statusLabel(contact.resolutionStatus)}</span></button>)}</div>}
-            </section>
-            <section className="surface session-panel" aria-labelledby="session-title">
-              <div className="surface-heading"><div><h2 id="session-title">Voice session</h2><p>Run locally, or open the browser console for monitoring.</p></div></div>
-              {selectedContact ? <>
-                <div className="selected-contact"><span>SELECTED CONTACT</span><strong>{selectedContact.name}</strong><small>ID: {selectedContact.id}</small></div>
-                <div className="command-block"><div className="command-heading"><div><h3>Terminal voice</h3><p>Talk using your PowerShell microphone and speakers.</p></div><span>01</span></div><pre>{terminalCommand}</pre><button className="button button-secondary copy-button" type="button" onClick={() => void handleCopyCommand(terminalCommand, "terminal")}>{copied === "terminal" ? "Copied!" : "Copy command"}</button></div>
-                <div className="command-block"><div className="command-heading"><div><h3>Browser monitoring</h3><p>Open the Agent console link printed in PowerShell. Keep the terminal open.</p></div><span>02</span></div><pre>{monitorCommand}</pre><button className="button button-secondary copy-button" type="button" onClick={() => void handleCopyCommand(monitorCommand, "monitor")}>{copied === "monitor" ? "Copied!" : "Copy command"}</button></div>
-              </> : <div className="empty-state session-empty"><strong>No contact selected</strong><span>Choose a contact from the directory to see the commands.</span></div>}
-            </section>
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="logo">
+          Circuit <small>AI AUDIT</small>
+        </div>
+        <nav aria-label="Main navigation">
+          <div className="nav-parent">▥ &nbsp; Analytics</div>
+          <div className="nav-active">◩ &nbsp; Call Audits</div>
+        </nav>
+      </aside>
+      <main className="main">
+        <header className="page-head">
+          <div className="head-icon">◧</div>
+          <div>
+            <h1>Call audits</h1>
+            <p>Review closed tickets and record the audit verdict.</p>
           </div>
-        </> : <>
-          <section className="issues-intro"><div><span className="section-kicker">ESCALATION QUEUE</span><h2>Recorded issues</h2><p>Every unresolved query appears here, linked to its contact.</p></div><span className="queue-count">{issues.length} total</span></section>
-          <section className="surface issues-surface" aria-label="Recorded issues"><div className="issue-table-head"><span>CONTACT / ISSUE</span><span>RECORDED</span><span>STATUS</span></div>
-            {loading ? <div className="empty-state" role="status">Loading issues…</div> : issues.length === 0 ? <div className="empty-state"><strong>No issues recorded</strong><span>When a caller says their query is unresolved, the issue will appear here.</span></div> : <div className="issue-list">{issues.map((issue) => <article className="issue-row" key={issue.id}><div className="issue-main"><strong>{contactNames.get(issue.contactId) ?? "Unknown contact"}</strong><p>{issue.description}</p><small>Contact ID: {issue.contactId}</small></div><time dateTime={issue.createdAt}>{formatDate(issue.createdAt)}</time><span className="status status--needs_escalation">Needs escalation</span></article>)}</div>}
+        </header>
+        <div className="content">
+          {error && (
+            <div className="error" role="alert">
+              {error}
+              <button onClick={() => setError("")}>Dismiss</button>
+            </div>
+          )}
+          <section className="filter-panel">
+            <label>
+              Date range
+              <div className="date-inputs">
+                <input
+                  aria-label="From date"
+                  type="date"
+                  value={from}
+                  onChange={(e) => {
+                    setFrom(e.target.value);
+                    setPage(1);
+                  }}
+                />
+                <span>to</span>
+                <input
+                  aria-label="To date"
+                  type="date"
+                  value={to}
+                  onChange={(e) => {
+                    setTo(e.target.value);
+                    setPage(1);
+                  }}
+                />
+              </div>
+            </label>
           </section>
-        </>}
-      </div>
-    </main>
-  </div>;
+          <section className="metrics" aria-label="Audit metrics">
+            {(
+              [
+                ["Pending audits", data.metrics.pending_audits],
+                ["Completed audits", data.metrics.completed_audits],
+                ["Problem solved", data.metrics.problem_solved],
+                ["Problem unsolved", data.metrics.problem_unsolved],
+              ] as const
+            ).map(([label, count]) => (
+              <div className="metric" key={label}>
+                <span>{label}</span>
+                <strong>{count}</strong>
+              </div>
+            ))}
+          </section>
+          <section className="queue-panel" aria-label="AI call queue">
+            <div>
+              <h2>AI call queue</h2>
+              <p>
+                Select up to 10 pending tickets in call order. Calls will use
+                LiveKit Cloud after outbound calling is configured.
+              </p>
+            </div>
+            <div className="queue-actions">
+              <span className="queue-badge">{selection.length} selected</span>
+              <button
+                className="primary"
+                disabled={!selection.length}
+                onClick={startCloudCall}
+              >
+                Start AI Call
+              </button>
+            </div>
+            {selection.length > 0 && (
+              <div className="queue-progress">
+                Selected order:{" "}
+                {selection
+                  .map(
+                    (id, position) =>
+                      `${position + 1}. ${data.tickets.find((row) => row.id === id)?.ticket_number ?? id}`,
+                  )
+                  .join(" → ")}
+              </div>
+            )}
+          </section>
+          <section className="table-panel" aria-label="Call audits">
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Select</th>
+                    <th>Phone Number</th>
+                    <th>Customer Name</th>
+                    <th>Closed At</th>
+                    <th>Type Of Issue</th>
+                    <th>Audit Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading ? (
+                    <tr>
+                      <td colSpan={7} className="table-message">
+                        Loading audits…
+                      </td>
+                    </tr>
+                  ) : data.tickets.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="table-message">
+                        No closed tickets match this date range.
+                      </td>
+                    </tr>
+                  ) : (
+                    data.tickets.map((row) => (
+                      <tr
+                        key={row.id}
+                        className="ticket-row"
+                        onClick={() => setDetail(row)}
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (
+                            event.target === event.currentTarget &&
+                            (event.key === "Enter" || event.key === " ")
+                          ) {
+                            event.preventDefault();
+                            setDetail(row);
+                          }
+                        }}
+                      >
+                        <td>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${row.ticket_number}`}
+                            checked={selection.includes(row.id)}
+                            disabled={
+                              row.audit.status ||
+                              (selection.length >= 10 &&
+                                !selection.includes(row.id))
+                            }
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={() => select(row.id)}
+                          />
+                        </td>
+                        <td>{row.phone_number || "—"}</td>
+                        <td>
+                          <button
+                            className="text-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setDetail(row);
+                            }}
+                          >
+                            {row.customer_name || row.ticket_number}
+                          </button>
+                          <small>{row.ticket_number}</small>
+                        </td>
+                        <td>{dateText(row.closed_at)}</td>
+                        <td>{row.issue || "—"}</td>
+                        <td>
+                          <span
+                            className={`status ${status(row).toLowerCase()}`}
+                          >
+                            {status(row)}
+                          </span>
+                        </td>
+                        <td>
+                          <button
+                            disabled={row.audit.status}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openAudit(row);
+                            }}
+                          >
+                            Complete audit
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="pagination">
+              <span>
+                Showing {data.tickets.length} of {data.total} audits
+              </span>
+              <div>
+                <button disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                  Previous
+                </button>
+                <span>
+                  Page {page} of {Math.max(data.pages, 1)}
+                </span>
+                <button
+                  disabled={page >= data.pages}
+                  onClick={() => setPage(page + 1)}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+      {cloudCallNotice && (
+        <div
+          className="overlay"
+          role="presentation"
+          onMouseDown={() => setCloudCallNotice(false)}
+        >
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="LiveKit Cloud calling status"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <button
+              className="close"
+              onClick={() => setCloudCallNotice(false)}
+              aria-label="Close"
+            >
+              ×
+            </button>
+            <h2>LiveKit Cloud calls</h2>
+            <p className="muted">
+              {selection.length} ticket{selection.length === 1 ? " is" : "s are"} queued
+              in order. Cloud call launch is not connected yet; it needs the
+              LiveKit Cloud worker and outbound provider configuration.
+            </p>
+            <ol className="queued-ticket-list">
+              {selection.map((id) => {
+                return <li key={id}>{id}</li>;
+              })}
+            </ol>
+            <div className="modal-actions">
+              <button onClick={() => setCloudCallNotice(false)}>Close</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {detail && (
+        <div
+          className="overlay drawer-overlay"
+          role="presentation"
+          onMouseDown={() => setDetail(null)}
+        >
+          <section
+            className="ticket-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Ticket details"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <button
+              className="close"
+              onClick={() => setDetail(null)}
+              aria-label="Close"
+            >
+              ×
+            </button>
+            <header className="drawer-header">
+              <div>
+                <p className="drawer-eyebrow">Ticket details</p>
+                <h2>{detail.ticket_number}</h2>
+                <p className="muted">
+                  {detail.customer_name || "Customer unavailable"}
+                </p>
+              </div>
+            </header>
+            <div className="drawer-body">
+              <section className="drawer-section">
+                <h3>Customer</h3>
+                <dl className="drawer-fields">
+                  <dt>Customer name</dt>
+                  <dd>{detail.customer_name || "—"}</dd>
+                  <dt>Phone number</dt>
+                  <dd>{detail.phone_number || "—"}</dd>
+                </dl>
+              </section>
+              <section className="drawer-section">
+                <h3>Ticket information</h3>
+                <dl className="drawer-fields">
+                  <dt>Closed at</dt>
+                  <dd>{dateText(detail.closed_at)}</dd>
+                  <dt>Type of issue</dt>
+                  <dd>{detail.issue || "—"}</dd>
+                </dl>
+              </section>
+              <section className="drawer-section">
+                <p className="drawer-eyebrow">Resolution Notes</p>
+                <h3>Solution</h3>
+                <p className="drawer-solution">{detail.solution || "—"}</p>
+              </section>
+              <section className="drawer-section">
+                <h3>Audit</h3>
+                <p>
+                  <span className={`status ${status(detail).toLowerCase()}`}>
+                    {status(detail)}
+                  </span>
+                </p>
+                {detail.audit.verdict.comment && (
+                  <p className="drawer-solution">{detail.audit.verdict.comment}</p>
+                )}
+              </section>
+            </div>
+            <div className="drawer-footer">
+              <button onClick={() => setDetail(null)}>Close</button>
+              {!detail.audit.status && (
+                <button
+                  className="primary"
+                  onClick={() => {
+                    setDetail(null);
+                    openAudit(detail);
+                  }}
+                >
+                  Complete audit
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+      {auditTarget && (
+        <div
+          className="overlay"
+          role="presentation"
+          onMouseDown={() => setAuditTarget(null)}
+        >
+          <form
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Complete audit"
+            onMouseDown={(e) => e.stopPropagation()}
+            onSubmit={(e) => void submitAudit(e)}
+          >
+            <button
+              className="close"
+              type="button"
+              onClick={() => setAuditTarget(null)}
+              aria-label="Close"
+            >
+              ×
+            </button>
+            <h2>Complete audit</h2>
+            <p className="muted">
+              {auditTarget.ticket_number} ·{" "}
+              {auditTarget.customer_name || "Customer unavailable"}
+            </p>
+            <label>
+              Problem solved
+              <select
+                value={verdict ? "yes" : "no"}
+                onChange={(e) => {
+                  const solved = e.target.value === "yes";
+                  setVerdict(solved);
+                  setComment(
+                    solved
+                      ? "The query is resolved."
+                      : "The issue is not solved",
+                  );
+                }}
+              >
+                <option value="no">Unsolved</option>
+                <option value="yes">Solved</option>
+              </select>
+            </label>
+            <label>
+              Comment
+              <textarea
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                maxLength={1000}
+                required
+              />
+            </label>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setAuditTarget(null)}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                type="submit"
+                disabled={working || !comment.trim()}
+              >
+                Complete audit
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
+  );
 }

@@ -1,4 +1,4 @@
-export type ToolName = "markResolved" | "askForIssue" | "recordIssue";
+export type ToolName = "completeSolvedAudit" | "completeUnsolvedAudit";
 
 export type ToolCall = {
   id: string;
@@ -14,15 +14,21 @@ export type ChatMessage = {
 };
 
 const descriptions: Record<ToolName, string> = {
-  markResolved: "Use only when the caller clearly says their query is resolved.",
-  askForIssue: "Use when the caller says their query is not resolved. Ask what the issue was next.",
-  recordIssue: "Use only after the caller describes the unresolved issue. Save their exact words.",
+  completeSolvedAudit:
+    "Use only when the caller clearly confirms the ticket's query is resolved.",
+  completeUnsolvedAudit:
+    "Use only when the caller clearly says the ticket's query is not resolved. Do not ask for a new issue description.",
 };
 
-export async function askCloudflare(messages: ChatMessage[], availableTools: ToolName[] = []) {
+// Gets a short reply or one audit action without spending tokens on hidden reasoning.
+export async function askCloudflare(
+  messages: ChatMessage[],
+  availableTools: ToolName[] = [],
+) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const apiToken = process.env.CLOUDFLARE_API_TOKEN;
-  if (!accountId || !apiToken) throw new Error("Cloudflare credentials are required.");
+  if (!accountId || !apiToken)
+    throw new Error("Cloudflare credentials are required.");
 
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`,
@@ -37,25 +43,37 @@ export async function askCloudflare(messages: ChatMessage[], availableTools: Too
         messages,
         temperature: 0.2,
         max_completion_tokens: 512,
-        ...(availableTools.length ? {
-          parallel_tool_calls: false,
-          tools: availableTools.map((name) => ({
-            type: "function",
-            function: {
-              name,
-              description: descriptions[name],
-              parameters: { type: "object", properties: {}, additionalProperties: false },
-            },
-          })),
-          tool_choice: "auto",
-        } : {}),
+        chat_template_kwargs: { enable_thinking: false },
+        ...(availableTools.length
+          ? {
+              parallel_tool_calls: false,
+              tools: availableTools.map((name) => ({
+                type: "function",
+                function: {
+                  name,
+                  description: descriptions[name],
+                  parameters: {
+                    type: "object",
+                    properties: {},
+                    additionalProperties: false,
+                  },
+                },
+              })),
+              tool_choice: "auto",
+            }
+          : {}),
       }),
       signal: AbortSignal.timeout(20_000),
     },
   );
-  if (!response.ok) throw new Error(`Cloudflare request failed with status ${response.status}.`);
+  if (!response.ok)
+    throw new Error(
+      `Cloudflare request failed with status ${response.status}.`,
+    );
 
-  const body = await response.json() as { choices?: Array<{ message?: ChatMessage }> };
+  const body = (await response.json()) as {
+    choices?: Array<{ message?: ChatMessage }>;
+  };
   const message = body.choices?.[0]?.message;
   if (!message) throw new Error("Cloudflare returned no message.");
   return message;

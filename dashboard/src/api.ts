@@ -1,31 +1,33 @@
-import type { Contact, Issue } from "./types";
+import type { AuditList } from "./types";
 
-const baseUrl = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+const baseUrl = import.meta.env.DEV
+  ? ""
+  : (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: { Accept: "application/json", ...init?.headers },
     ...init,
+    headers: { Accept: "application/json", ...init?.headers },
   });
   if (!response.ok) {
-    const body = await response.json() as { error: string };
-    throw new Error(body.error);
+    const body = (await response
+      .json()
+      .catch(() => ({ error: "Request failed." }))) as { error?: string };
+    throw new Error(body.error || "Request failed.");
   }
-  return await response.json() as T;
+  return response.json() as Promise<T>;
 }
 
-export function listContacts() {
-  return request<{ contacts: Contact[] }>("/api/contacts");
+export function listAudits(page: number, from: string, to: string) {
+  const query = new URLSearchParams({ page: String(page), limit: "10" });
+  if (from) query.set("from", new Date(`${from}T00:00:00`).toISOString());
+  if (to) query.set("to", new Date(`${to}T23:59:59.999`).toISOString());
+  return request<AuditList>(`/api/audits?${query}`);
 }
-
-export function listIssues() {
-  return request<{ issues: Issue[] }>("/api/issues");
-}
-
-export function createContact(name: string) {
-  return request<{ contact: Contact }>("/api/contacts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+export function completeAudit(id: string, verdict: boolean, payload: string) {
+  return request(`/api/tickets/${id}/audit`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", "X-Voice-Audit-Local": "1" },
+    body: JSON.stringify({ verdict, payload }),
   });
 }
