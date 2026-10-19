@@ -30,51 +30,68 @@ export async function askCloudflare(
   if (!accountId || !apiToken)
     throw new Error("Cloudflare credentials are required.");
 
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: process.env.CLOUDFLARE_AI_MODEL || "@cf/zai-org/glm-4.7-flash",
-        messages,
-        temperature: 0.2,
-        max_completion_tokens: 512,
-        chat_template_kwargs: { enable_thinking: false },
-        ...(availableTools.length
-          ? {
-              parallel_tool_calls: false,
-              tools: availableTools.map((name) => ({
-                type: "function",
-                function: {
-                  name,
-                  description: descriptions[name],
-                  parameters: {
-                    type: "object",
-                    properties: {},
-                    additionalProperties: false,
+  const startedAt = performance.now();
+  let headersAt = startedAt;
+  try {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: process.env.CLOUDFLARE_AI_MODEL || "@cf/zai-org/glm-4.7-flash",
+          messages,
+          temperature: 0.2,
+          max_completion_tokens: 192,
+          chat_template_kwargs: { enable_thinking: false },
+          ...(availableTools.length
+            ? {
+                parallel_tool_calls: false,
+                tools: availableTools.map((name) => ({
+                  type: "function",
+                  function: {
+                    name,
+                    description: descriptions[name],
+                    parameters: {
+                      type: "object",
+                      properties: {},
+                      additionalProperties: false,
+                    },
                   },
-                },
-              })),
-              tool_choice: "auto",
-            }
-          : {}),
-      }),
-      signal: AbortSignal.timeout(20_000),
-    },
-  );
-  if (!response.ok)
-    throw new Error(
-      `Cloudflare request failed with status ${response.status}.`,
+                })),
+                tool_choice: "auto",
+              }
+            : {}),
+        }),
+        signal: AbortSignal.timeout(20_000),
+      },
     );
+    headersAt = performance.now();
+    if (!response.ok)
+      throw new Error(
+        `Cloudflare request failed with status ${response.status}.`,
+      );
 
-  const body = (await response.json()) as {
-    choices?: Array<{ message?: ChatMessage }>;
-  };
-  const message = body.choices?.[0]?.message;
-  if (!message) throw new Error("Cloudflare returned no message.");
-  return message;
+    const body = (await response.json()) as {
+      choices?: Array<{ message?: ChatMessage }>;
+    };
+    const completedAt = performance.now();
+    console.info("Cloudflare LLM timing", {
+      headersMs: Math.round(headersAt - startedAt),
+      bodyMs: Math.round(completedAt - headersAt),
+      totalMs: Math.round(completedAt - startedAt),
+    });
+    const message = body.choices?.[0]?.message;
+    if (!message) throw new Error("Cloudflare returned no message.");
+    return message;
+  } catch (error) {
+    console.warn("Cloudflare LLM request failed", {
+      totalMs: Math.round(performance.now() - startedAt),
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    throw error;
+  }
 }
